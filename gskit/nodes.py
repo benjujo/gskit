@@ -385,9 +385,9 @@ class GSNode(abc.ABC):
         
 
     def compile_proof(self, defs, crs_dict, target):
-        prelude = f"""from framework import CRS, Equation, equations, proof
-from utils import NamedArray
-import {target} as elements
+        prelude = f"""from gskit.framework import CRS, Equation, equations, proof
+from gskit.utils import NamedArray
+import gskit.{target} as elements
 
 crs = CRS.from_json({crs_dict})
 
@@ -422,10 +422,10 @@ const = {{}}
 
 
     def compile_verify(self, defs, crs_filename, target):
-        prelude = f"""from framework import CRS, Equation, equations, verify
-from utils import NamedArray, UnamedArray
+        prelude = f"""from gskit.framework import CRS, Equation, equations, verify
+from gskit.utils import NamedArray, UnamedArray
 import numpy as np
-import {target} as elements
+import gskit.{target} as elements
 
 crs = CRS.from_json({crs_filename})
 
