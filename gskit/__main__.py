@@ -1,5 +1,5 @@
 import argparse
-from parser import GSParser
+from gskit.parser import GSParser
 from gskit.ast_builder import ASTTransformer
 from gskit.gsfy import gsfy
 import subprocess
@@ -109,7 +109,7 @@ def verify(args):
 def generate_crs(args):
     crs_file = args.crs
     crs_type = args.type
-    from framework import CRS
+    from gskit.framework import CRS
     
     
     if crs_type == 'sound':
@@ -122,9 +122,7 @@ def generate_crs(args):
         f.write(crs.to_json())
     print(crs.to_json())
     
-
-
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(description="Process a Groth-Sahai proof.")
     subparsers = parser.add_subparsers()
 
@@ -162,3 +160,7 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     args.func(args)
+
+
+if __name__ == '__main__':
+    main()

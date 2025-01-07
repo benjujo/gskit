@@ -23,9 +23,13 @@ RUN cd charm && make
 RUN cd charm && make install && ldconfig
 
 #RUN cd charm && make test
+COPY setup.py setup.py
+COPY gskit gskit
 RUN python3.7 -m pip install numpy lark
+RUN python3.7 setup.py sdist bdist_wheel
+RUN python3.7 -m pip install .
 
-COPY src/ src
+
 WORKDIR /src
 
 #ENTRYPOINT ["tail", "-f", "/dev/null"]

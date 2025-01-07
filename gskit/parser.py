@@ -14,7 +14,7 @@ class GSIndenter(Indenter):
 
 class GSParser:
     def __init__(self):
-        grammar_path = Path("grammar.lark")
+        grammar_path = Path(__file__).parent / "grammar.lark"
         with grammar_path.open("rt") as f:
             grammar_text = f.read()
         

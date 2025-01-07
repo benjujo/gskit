@@ -7,7 +7,7 @@ from gskit.elements import (
     GTElement,
     g1,
     g2,)
-from utils import NamedArray, UnamedArray, random_zp
+from gskit.utils import NamedArray, UnamedArray, random_zp
 
 import json
 
