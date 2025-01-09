@@ -1,4 +1,4 @@
-start         : vars consts eqs
+start         : _NL? _INDENT* vars consts eqs _DEDENT*
 
 vars          : "variables:" _NL _INDENT var+ _DEDENT
 
