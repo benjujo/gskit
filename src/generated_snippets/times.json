@@ -1,0 +1,10 @@
+{"s1": {"proof_time": 231, "verify_time": 774},
+"s2": {"proof_time": 303, "verify_time": 1112},
+"s3": {"proof_time": 344, "verify_time": 1467},
+"s4": {"proof_time": 411, "verify_time": 1764},
+"s5": {"proof_time": 442, "verify_time": 2100},
+"s6": {"proof_time": 501, "verify_time": 2466},
+"s7": {"proof_time": 563, "verify_time": 2795},
+"s8": {"proof_time": 627, "verify_time": 3105},
+"s9": {"proof_time": 684, "verify_time": 3467},
+"s10": {"proof_time": 737, "verify_time": 3778}}
