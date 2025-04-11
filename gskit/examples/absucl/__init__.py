@@ -1,6 +1,7 @@
 from gskit.framework import Proof
 from gskit.elements import ZpElement, G1Element, G2Element, GTElement
-from GS.equations import Equation, QEquation, MS1Equation, MS2Equation, PPEquation, Variable, Constant, AMapRight, AMapLeft, AMapBoth
+from gskit.framework import CRS
+from gskit.equations import Equation, QEquation, MS1Equation, MS2Equation, PPEquation, Variable, Constant, AMapRight, AMapLeft, AMapBoth
 from ds import FBB as DS
 from lit import WBB as LIT
 from rpsps import RPSPS
@@ -11,8 +12,8 @@ import json
 
 
 class ABSUCL():
-    def __init__(self, gs: GS, psps: RPSPS, ds: DS, lit: LIT, sk_psdo: List[ZpElement], vk_psdo: List[G2Element]):
-        self.gs = gs
+    def __init__(self, crs: CRS, psps: RPSPS, ds: DS, lit: LIT, sk_psdo: List[ZpElement], vk_psdo: List[G2Element]):
+        self.crs = CRS
         self.psps = psps
         self.ds = ds
         self.lit = lit
@@ -21,17 +22,18 @@ class ABSUCL():
         self.vk_attrs: Dict[str, G2Element] = {}
 
     @classmethod
-    def setup(cls):
-        gs = GS.setup()
-        psps = RPSPS(gs.CRS)
-        ds = DS(gs.CRS)
-        lit = LIT(gs.CRS)
+    def setup(cls, crs_json_str:str):
+        #gs = GS.setup()
+        crs = CRS.from_json(crs_json_str)
+        psps = RPSPS(crs)
+        ds = DS(crs)
+        lit = LIT(crs)
         sk_psdo,vk_psdo = ds.keygen()
-        return cls(gs, psps, ds, lit, sk_psdo, vk_psdo)
+        return cls(crs, psps, ds, lit, sk_psdo, vk_psdo)
 
     @classmethod
     def setup_from_json(cls, json_str:str):
-        gs = GS.from_json(json_str)
+        crs = CRS.from_json(json_str)
         json_dict = json.loads(json_str)
         sk_psdo = [ZpElement.from_json(zp) for zp in json_dict['sk_psdo']] if 'sk_psdo' in json_dict else [None]
         vk_psdo = [G2Element.from_json(g2) for g2 in json_dict['vk_psdo']]
@@ -60,10 +62,28 @@ class ABSUCL():
         return sk_ida
 
     def sign(self, m:str, predicate:str, usk:ZpElement, sk_ida_dict:Dict[str, Tuple[G1Element, G1Element]], recip:int):
+        # Constants
+        z_one = ZpElement.init(1)
+        z_zero = ZpElement.init(0)
+        z_minus_one = ZpElement.init(-1)
+        constants = {
+            "z_one": z_one,
+            "z_zero": z_zero,
+            "z_minus_one": z_minus_one,
+            "gt_zero": GTElement.zero(),
+        }
+
         psdo_attr = ZpElement.hash_from_string(f"{m}{predicate}{recip}")
         #xpredicate = f"({predicate}) or {psdo_attr}"
         xpredicate = f"({predicate}) or PSDO"
         msp = MSP.from_policy_str(xpredicate)
+
+        #constants["psdo_attr"] = psdo_attr
+        for column in range(1, msp.width):
+            for i,attr_name in enumerate(msp.index):
+                constants[f"msp_{i}_{column}"] = msp.msp[i][column]
+
+        
 
         for attr_name in msp.index:
             if not attr_name in self.vk_attrs:
@@ -83,25 +103,24 @@ class ABSUCL():
 
         # TODO: Change method name to tag instead of sign
         tag = self.lit.sign(usk, ZpElement.init(recip))
+        constants["tag"] = tag
 
 
         # Witnesses
-        witnesses = {}
+        variables = {}
         for attr_name in msp.index:
-            witnesses[f"z_{attr_name}"] = ZpElement.init(0) if attr_name not in sk_ida_dict else ZpElement.init(1)
+            variables[f"z_{attr_name}"] = ZpElement.init(0) if attr_name not in sk_ida_dict else ZpElement.init(1)
             z_attr = f"z_{attr_name}"
             #witnesses[f"R_{attr_name}"] = randomized_sk_ida[attr_name][0] NOT A WITNESS!!!!
             if attr_name == "PSDO": continue
-            witnesses[f"Rsmile_{attr_name}"] = witnesses[f"z_{attr_name}"] * randomized_sk_ida[attr_name][0]
-            witnesses[f"S_{attr_name}"] = randomized_sk_ida[attr_name][1]
-            witnesses[f"Ssmile_{attr_name}"] = witnesses[f"z_{attr_name}"] * witnesses[f"S_{attr_name}"]
-        witnesses["F"] = usk * self.g
-        witnesses["Ftilda"] = usk * self.h
-        witnesses["sigma"] = randomized_sk_ida["PSDO"][0]
-        witnesses["sigmasmile"] = witnesses["z_PSDO"] * randomized_sk_ida["PSDO"][0]
-        witnesses["Gsmile"] = witnesses["z_PSDO"] * self.g
-
-        variables = {k: Variable(k, v) for k,v in witnesses.items()}
+            variables[f"Rsmile_{attr_name}"] = variables[f"z_{attr_name}"] * randomized_sk_ida[attr_name][0]
+            variables[f"S_{attr_name}"] = randomized_sk_ida[attr_name][1]
+            variables[f"Ssmile_{attr_name}"] = variables[f"z_{attr_name}"] * variables[f"S_{attr_name}"]
+        variables["F"] = usk * self.g
+        variables["Ftilda"] = usk * self.h
+        variables["sigma"] = randomized_sk_ida["PSDO"][0]
+        variables["sigmasmile"] = variables["z_PSDO"] * randomized_sk_ida["PSDO"][0]
+        variables["Gsmile"] = variables["z_PSDO"] * self.g
 
         # Equations
         # 1. MSP equations
@@ -110,83 +129,92 @@ class ABSUCL():
         # First column
         first_column_amaps = []
         for i,attr_name in enumerate(msp.index):
-            Mz = AMapRight(Constant(msp.msp[i][0]), variables[f"z_{attr_name}"])
+            Mz = f"msp_{i}_{0} * z_{attr_name}"
             first_column_amaps.append(Mz)
-        msp_eq0 = QEquation("msp_0", first_column_amaps, Constant(ZpElement.init(1)))
-        msp_eq0._validate()
+        msp_eq0 = " + ".join(first_column_amaps) + " = z_one"
         msp_eqs.append(msp_eq0)
 
         # Other columns
         for column in range(1, msp.width):
             column_amaps = []
             for i,attr_name in enumerate(msp.index):
-                Mz = AMapRight(Constant(msp.msp[i][column]), variables[f"z_{attr_name}"])
+                Mz = f"msp_{i}_{column} * z_{attr_name}"
                 column_amaps.append(Mz)
-            msp_eq = QEquation(f"msp_{column}", column_amaps, Constant(ZpElement.init(0)))
-            msp_eq._validate()
+            msp_eq = " + ".join(column_amaps) + " = z_zero"
             msp_eqs.append(msp_eq)
 
         # 2. Tag equation
-        tag_amap = AMapRight(Constant(tag), variables["Ftilda"])
-        tag_target = Constant(self.g.pair(self.h) * ~tag.pair(ZpElement.init(recip) * self.h))
-        tag_eq = PPEquation("tag", [tag_amap], tag_target)
-        tag_eq._validate()
+        tag_target = self.g.pair(self.h * ~tag.pair(ZpElement.init(recip) * self.h))
+        constants["tag_target"] = tag_target
+        tag_eq = f"tag * Ftilda = tag_target"
 
         # 3. Is Consistent equation
-        is_consistent_amap1 = AMapLeft(variables["F"], Constant(self.h))
-        is_consistent_amap2 = AMapRight(Constant(~self.g), variables["Ftilda"])
-        is_consistent_target = Constant(GTElement.zero())
-        is_consistent_eq = PPEquation("is_consistent", [is_consistent_amap1, is_consistent_amap2], is_consistent_target)
-        is_consistent_eq._validate()
+        is_consistent_amap1 = "F * h"
+        is_consistent_amap2 = "ng * Ftilda"
+        constants["ng"] = ~self.g
+        is_consistent_eq = " + ".join([is_consistent_amap1, is_consistent_amap2]) + " = gt_zero"
 
         # 4. RPSPS verify equations
         rpsps_eqs = []
         for attr_name in msp.index:
             if attr_name == "PSDO":
                 continue
-            S_amap1 = AMapBoth(variables[f"S_{attr_name}"], variables[f"z_{attr_name}"])
-            S_amap2 = AMapLeft(variables[f"Ssmile_{attr_name}"], Constant(ZpElement.init(-1)))
-            S_eq = MS1Equation(f"S_{attr_name}", [S_amap1, S_amap2], Constant(G1Element.zero()))
-            S_eq._validate()
+            S_amap1 = f"S_{attr_name} * z_{attr_name}"
+            S_amap2 = f"Ssmile_{attr_name} * z_minus_one"
+            S_eq = " + ".join([S_amap1, S_amap2]) + " = gt_zero"
 
-            R_amap1 = AMapRight(Constant(randomized_sk_ida[attr_name][0]), variables[f"z_{attr_name}"])
-            R_amap2 = AMapLeft(variables[f"Rsmile_{attr_name}"], Constant(ZpElement.init(-1)))
-            R_eq = MS1Equation(f"R_{attr_name}", [R_amap1, R_amap2], Constant(G1Element.zero()))
-            R_eq._validate()
+            R_amap1 = f"randomized_sk_ida_{attr_name} * z_{attr_name}"
+            R_amap2 = f"Rsmile_{attr_name} * z_minus_one"
+            R_eq = " + ".join([R_amap1, R_amap2]) + " = gt_zero"
 
             a_attr = ZpElement.from_str(attr_name)
-            V_amap1 = AMapBoth(variables[f"Rsmile_{attr_name}"], variables["Ftilda"])
-            V_amap2 = AMapLeft(variables[f"Rsmile_{attr_name}"], Constant(self.vk_attrs[attr_name][0])) # vk_attrs[name] => [X,Y,Z]
-            V_amap3 = AMapLeft(variables[f"Rsmile_{attr_name}"], Constant(a_attr * self.vk_attrs[attr_name][1]))
-            V_amap4 = AMapLeft(variables[f"Ssmile_{attr_name}"], Constant(~self.vk_attrs[attr_name][2]))
-            V_eq = PPEquation(f"V_{attr_name}", [V_amap1, V_amap2, V_amap3, V_amap4], Constant(GTElement.zero()))
-            V_eq._validate()
+            constants[f"vk_attrs_{attr_name}_0"] = self.vk_attrs[attr_name][0]
+            constants[f"vk_attrs_{attr_name}_1"] = a_attr * self.vk_attrs[attr_name][1]
+            constants[f"vk_attrs_{attr_name}_2"] = ~self.vk_attrs[attr_name][2]
+            V_amap1 = f"Rsmile_{attr_name} * Ftilda"
+            V_amap2 = f"Rsmile_{attr_name} * vk_attrs_{attr_name}_0"
+            V_amap3 = f"Rsmile_{attr_name} * vk_attrs_{attr_name}_1"
+            V_amap4 = f"Ssmile_{attr_name} * vk_attrs_{attr_name}_2"
+            V_eq = " + ".join([V_amap1, V_amap2, V_amap3, V_amap4]) + " = gt_zero"
 
             rpsps_eqs.append(S_eq)
             rpsps_eqs.append(R_eq)
             rpsps_eqs.append(V_eq)
 
         # 5. psdo verify equations
-        sigma_amap1 = AMapBoth(variables["sigma"], variables["z_PSDO"])
-        sigma_amap2 = AMapLeft(variables["sigmasmile"], Constant(ZpElement.init(-1)))
-        sigma_eq = MS1Equation("sigma", [sigma_amap1, sigma_amap2], Constant(G1Element.zero()))
-        sigma_eq._validate()
+        sigma_amap1 = f"sigma * z_PSDO"
+        sigma_amap2 = f"sigmasmile * z_minus_one"
+        sigma_eq = " + ".join([sigma_amap1, sigma_amap2]) + " = g1_zero"
+        constants["g1_zero"] = G1Element.zero()
 
-        G_amap1 = AMapRight(Constant(self.g), variables["z_PSDO"])
-        G_amap2 = AMapLeft(variables["Gsmile"], Constant(ZpElement.init(-1)))
-        G_eq = MS1Equation("G", [G_amap1, G_amap2], Constant(G1Element.zero()))
-        G_eq._validate()
+        G_amap1 = f"g * z_PSDO"
+        G_amap2 = f"Gsmile * z_minus_one"
+        G_eq = " + ".join([G_amap1, G_amap2]) + " = g1_zero"
 
-        fbb_amap1 = AMapLeft(variables['sigmasmile'], Constant(self.vk_psdo[0] + self.vk_psdo[1] + psdo_attr * -self.h)) # TODO: This wont work!!!
-        #fbb_amap1 = AMapLeft(variables['sigmasmile'], Constant(self.vk_psdo[0] + self.vk_psdo[1] + ZpElement.random() * self.h)) # TODO: Could be anything?
-        fbb_amap2 = AMapLeft(variables['Gsmile'], Constant(self.h))
-        fbb_eq = PPEquation("fbb", [fbb_amap1, fbb_amap2], Constant(GTElement.zero()))
-        fbb_eq._validate()
+        # For FBB equation
+        constants["vk_psdo_combined"] = self.vk_psdo[0] + self.vk_psdo[1] + psdo_attr * -self.h
+        constants["h"] = self.h
+        fbb_amap1 = f"sigmasmile * vk_psdo_combined"
+        fbb_amap2 = f"Gsmile * h"
+        fbb_eq = " + ".join([fbb_amap1, fbb_amap2]) + " = gt_zero"
 
         psdo_eqs = [sigma_eq, G_eq, fbb_eq]
 
 
         eqs = msp_eqs + [tag_eq, is_consistent_eq] + rpsps_eqs + psdo_eqs
+
+        GS_STRING = f"""
+variables:
+    {'\n    '.join(variables)}
+
+constants:
+    {'\n    '.join(constants)}
+
+equations:
+    {'\n    '.join(eqs)}
+"""
+
+
         proof = self.gs.prove(eqs, variables)
 
         return {
@@ -268,12 +296,14 @@ class ABSUCL():
             R_eq._validate()
 
             a_attr = ZpElement.from_str(attr_name)
-            V_amap1 = AMapBoth(Variable.reference(f"Rsmile_{attr_name}"), Variable.reference("Ftilda"))
-            V_amap2 = AMapLeft(Variable.reference(f"Rsmile_{attr_name}"), Constant(self.vk_attrs[attr_name][0])) # vk_attrs[name] => [X,Y,Z]
-            V_amap3 = AMapLeft(Variable.reference(f"Rsmile_{attr_name}"), Constant(a_attr * self.vk_attrs[attr_name][1]))
-            V_amap4 = AMapLeft(Variable.reference(f"Ssmile_{attr_name}"), Constant(~self.vk_attrs[attr_name][2]))
-            V_eq = PPEquation(f"V_{attr_name}", [V_amap1, V_amap2, V_amap3, V_amap4], Constant(GTElement.zero()))
-            V_eq._validate()
+            constants[f"vk_attrs_{attr_name}_0"] = self.vk_attrs[attr_name][0]
+            constants[f"vk_attrs_{attr_name}_1"] = a_attr * self.vk_attrs[attr_name][1]
+            constants[f"vk_attrs_{attr_name}_2"] = ~self.vk_attrs[attr_name][2]
+            V_amap1 = f"Rsmile_{attr_name} * Ftilda"
+            V_amap2 = f"Rsmile_{attr_name} * vk_attrs_{attr_name}_0"
+            V_amap3 = f"Rsmile_{attr_name} * vk_attrs_{attr_name}_1"
+            V_amap4 = f"Ssmile_{attr_name} * vk_attrs_{attr_name}_2"
+            V_eq = " + ".join([V_amap1, V_amap2, V_amap3, V_amap4]) + " = gt_zero"
 
             rpsps_eqs.append(S_eq)
             rpsps_eqs.append(R_eq)

@@ -1,4 +1,4 @@
-from GS.elements import ZpElement, G1Element, G2Element
+from gskit.elements import ZpElement, G1Element, G2Element
 from typing import List, Tuple, Dict
 
 

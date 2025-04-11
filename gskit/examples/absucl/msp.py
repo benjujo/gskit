@@ -1,5 +1,5 @@
 from charm.toolbox.msp import MSP as CMSP
-from GS.elements import ZpElement, group
+from gskit.elements import ZpElement, group
 from typing import List
 import json
 
