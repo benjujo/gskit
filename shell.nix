@@ -9,6 +9,10 @@ let
     wheel
     # Add lark explicitly
     lark
+    # From charm requirements
+    (pyparsing.overridePythonAttrs (old: { version = "2.1.5"; }))
+    hypothesis
+    pytest
   ]);
 in
 pkgs.mkShell {
