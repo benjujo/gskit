@@ -2,6 +2,27 @@
 
 let
   python310 = pkgs.python310;
+
+ # Override pyparsing with an older version
+  pyparsing_2_1_5 = pkgs.python310.pkgs.buildPythonPackage rec {
+    pname = "pyparsing";
+    version = "2.1.5";
+
+    src = pkgs.fetchPypi {
+      inherit pname version;
+      sha256 = "sha256-uazpm1gRdNfKmIkae8V/0IiSuU8XkiZF2Qg197m1SlY=";
+    };
+
+    # Use postPatch to directly embed the fix into the pyparsing.py file
+    postPatch = ''
+      # Fix for Python 3.10+ compatibility - collections abstract classes moved to collections.abc
+      sed -i '1s/^/import collections.abc\n\n# Fix for Python 3.10+ compatibility\nfor name in ["MutableMapping", "Mapping", "Sequence", "Iterable", "Iterator", "Container", "Callable", "Set", "MutableSet"]:\n    if not hasattr(collections, name):\n        setattr(collections, name, getattr(collections.abc, name))\n\n/' pyparsing.py
+    '';
+
+    doCheck = false;
+    pythonImportsCheck = [ "pyparsing" ];
+  };
+
   pythonEnv = python310.withPackages (ps: with ps; [
     numpy
     pip
@@ -10,7 +31,7 @@ let
     # Add lark explicitly
     lark
     # From charm requirements
-    (pyparsing.overridePythonAttrs (old: { version = "2.1.5"; }))
+    pyparsing_2_1_5
     hypothesis
     pytest
   ]);
