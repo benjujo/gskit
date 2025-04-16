@@ -2,14 +2,15 @@ from gskit.elements import ZpElement, G1Element, G2Element
 from typing import List, Tuple, Dict
 from functools import reduce
 import operator
+from gskit.framework import CRS
 
 
 class RPSPS():
     '''Ghadafi PSPS scheme
     ref: '''
-    def __init__(self, CRS: Dict, N: int=1):
-        self.g = CRS['u1'].e1
-        self.h = CRS['v1'].e1
+    def __init__(self, crs: CRS, N: int=1):
+        self.g = crs.g1
+        self.h = crs.g2
         self.N = N
 
     def keygen(self) -> Tuple[List[ZpElement], List[G2Element]]:

@@ -1,12 +1,14 @@
 from gskit.elements import ZpElement, G1Element, G2Element
 from typing import Tuple, Dict
+from gskit.framework import CRS
 
 
 class WBB():
     '''Weak Boneh-Boyen signature scheme'''
-    def __init__(self, CRS: Dict):
-        self.g = CRS['u1'].e1
-        self.h = CRS['v1'].e1
+    def __init__(self, crs: CRS
+    ):
+        self.g = crs.g1
+        self.h = crs.g2
 
     def keygen(self) -> Tuple[ZpElement, G2Element]:
         sk = ZpElement.random()

@@ -1,35 +1,33 @@
 from gskit.framework import Proof
 from gskit.elements import ZpElement, G1Element, G2Element, GTElement
 from gskit.framework import CRS
-from gskit.equations import Equation, QEquation, MS1Equation, MS2Equation, PPEquation, Variable, Constant, AMapRight, AMapLeft, AMapBoth
-from ds import FBB as DS
-from lit import WBB as LIT
-from rpsps import RPSPS
-from msp import MSP
+from .ds import FBB as DS
+from .lit import WBB as LIT
+from .rpsps import RPSPS
+from .msp import MSP
 
 from typing import Dict, List, Tuple
 import json
 
 
 class ABSUCL():
-    def __init__(self, crs: CRS, psps: RPSPS, ds: DS, lit: LIT, sk_psdo: List[ZpElement], vk_psdo: List[G2Element]):
-        self.crs = CRS
-        self.psps = psps
-        self.ds = ds
-        self.lit = lit
-        self.sk_psdo = sk_psdo
-        self.vk_psdo = vk_psdo
+    def __init__(self, crs: CRS, sk_psdo: List[ZpElement]=None, vk_psdo: List[G2Element]=None):
+        self.crs = crs
+        self.psps = RPSPS(crs)
+        self.ds = DS(crs)
+        self.lit = LIT(crs)
+        if sk_psdo and vk_psdo:
+            self.sk_psdo = sk_psdo
+            self.vk_psdo = vk_psdo
+        else:
+            self.sk_psdo, self.vk_psdo = self.ds.keygen()
         self.vk_attrs: Dict[str, G2Element] = {}
 
     @classmethod
     def setup(cls, crs_json_str:str):
         #gs = GS.setup()
         crs = CRS.from_json(crs_json_str)
-        psps = RPSPS(crs)
-        ds = DS(crs)
-        lit = LIT(crs)
-        sk_psdo,vk_psdo = ds.keygen()
-        return cls(crs, psps, ds, lit, sk_psdo, vk_psdo)
+        return cls(crs)
 
     @classmethod
     def setup_from_json(cls, json_str:str):
@@ -38,11 +36,10 @@ class ABSUCL():
         sk_psdo = [ZpElement.from_json(zp) for zp in json_dict['sk_psdo']] if 'sk_psdo' in json_dict else [None]
         vk_psdo = [G2Element.from_json(g2) for g2 in json_dict['vk_psdo']]
 
-        psps = RPSPS(gs.CRS)
-        ds = DS(gs.CRS)
-        lit = LIT(gs.CRS)
-        key = ds.keygen()
-        return cls(gs, psps, ds, lit, sk_psdo, vk_psdo)
+        psps = RPSPS(crs)
+        ds = DS(crs)
+        lit = LIT(crs)
+        return cls(crs, sk_psdo, vk_psdo)
 
     def add_vk_attr(self, attribute:str, vk_aa:G2Element):
         self.vk_attrs[attribute] = vk_aa
@@ -203,16 +200,22 @@ class ABSUCL():
 
         eqs = msp_eqs + [tag_eq, is_consistent_eq] + rpsps_eqs + psdo_eqs
 
-        GS_STRING = f"""
+        variables_str = "\n    ".join(variables)
+        constants_str = "\n    ".join(constants)
+        eqs_str = "\n    ".join(eqs)
+
+        GS_STRING = f'''
 variables:
-    {'\n    '.join(variables)}
+    {variables_str}
 
 constants:
-    {'\n    '.join(constants)}
+    {constants_str}
 
 equations:
-    {'\n    '.join(eqs)}
-"""
+    {eqs_str}
+'''
+        
+        print(GS_STRING)
 
 
         proof = self.gs.prove(eqs, variables)
@@ -232,17 +235,49 @@ equations:
         tag = signature["tau"]
         sk_ida_hat = signature["sk_ida_hat"]
 
+        # Constants
+        z_one = ZpElement.init(1)
+        z_zero = ZpElement.init(0)
+        z_minus_one = ZpElement.init(-1)
+        constants = {
+            "z_one": z_one,
+            "z_zero": z_zero,
+            "z_minus_one": z_minus_one,
+            "gt_zero": GTElement.zero(),
+            "g1_zero": G1Element.zero(),
+            "tag": tag
+        }
+
         psdo_attr = ZpElement.hash_from_string(f"{m}{predicate}{recip}")
         #xpredicate = f"({predicate}) or {psdo_attr}"
         xpredicate = f"({predicate}) or PSDO"
         msp = MSP.from_policy_str(xpredicate)
 
+        for column in range(1, msp.width):
+            for i,attr_name in enumerate(msp.index):
+                constants[f"msp_{i}_{column}"] = msp.msp[i][column]
+
         for attr_name in msp.index:
             if not attr_name in self.vk_attrs:
                 if attr_name == "PSDO": continue
                 raise Exception(f"Attribute {attr_name} not found in attribute authorities")
-
-
+                
+        for attr_name in msp.index:
+            if attr_name == "PSDO": continue
+            constants[f"randomized_sk_ida_{attr_name}"] = sk_ida_hat[attr_name]
+            
+            a_attr = ZpElement.from_str(attr_name)
+            constants[f"vk_attrs_{attr_name}_0"] = self.vk_attrs[attr_name][0]
+            constants[f"vk_attrs_{attr_name}_1"] = a_attr * self.vk_attrs[attr_name][1]
+            constants[f"vk_attrs_{attr_name}_2"] = ~self.vk_attrs[attr_name][2]
+            
+        constants["vk_psdo_combined"] = self.vk_psdo[0] + self.vk_psdo[1] + psdo_attr * -self.h
+        constants["h"] = self.h
+        constants["g"] = self.g
+        constants["ng"] = ~self.g
+        constants["sigma"] = sk_ida_hat.get("PSDO", G1Element.zero())
+        
+        
 
         # Equations
         # 1. MSP equations
@@ -251,54 +286,44 @@ equations:
         # First column
         first_column_amaps = []
         for i,attr_name in enumerate(msp.index):
-            Mz = AMapRight(Constant(msp.msp[i][0]), Variable.reference(f"z_{attr_name}"))
+            Mz = f"msp_{i}_{0} * z_{attr_name}"
             first_column_amaps.append(Mz)
-        msp_eq0 = QEquation("msp_0", first_column_amaps, Constant(ZpElement.init(1)))
-        msp_eq0._validate()
+        msp_eq0 = " + ".join(first_column_amaps) + " = z_one"
         msp_eqs.append(msp_eq0)
 
         # Other columns
         for column in range(1, msp.width):
             column_amaps = []
             for i,attr_name in enumerate(msp.index):
-                Mz = AMapRight(Constant(msp.msp[i][column]), Variable.reference(f"z_{attr_name}"))
+                Mz = f"msp_{i}_{column} * z_{attr_name}"
                 column_amaps.append(Mz)
-            msp_eq = QEquation(f"msp_{column}", column_amaps, Constant(ZpElement.init(0)))
-            msp_eq._validate()
+            msp_eq = " + ".join(column_amaps) + " = z_zero"
             msp_eqs.append(msp_eq)
 
         # 2. Tag equation
-        tag_amap = AMapRight(Constant(tag), Variable.reference("Ftilda"))
-        tag_target = Constant(self.g.pair(self.h) * ~tag.pair(ZpElement.init(recip) * self.h))
-        tag_eq = PPEquation("tag", [tag_amap], tag_target)
-        tag_eq._validate()
+        # Tag target calculation
+        tag_target = self.g.pair(self.h) * ~tag.pair(ZpElement.init(recip) * self.h)
+        constants["tag_target"] = tag_target
+        tag_eq = "tag * Ftilda = tag_target"
 
         # 3. Is Consistent equation
-        is_consistent_amap1 = AMapLeft(Variable.reference("F"), Constant(self.h))
-        is_consistent_amap2 = AMapRight(Constant(~self.g), Variable.reference("Ftilda"))
-        is_consistent_target = Constant(GTElement.zero())
-        is_consistent_eq = PPEquation("is_consistent", [is_consistent_amap1, is_consistent_amap2], is_consistent_target)
-        is_consistent_eq._validate()
+        is_consistent_amap1 = "F * h"
+        is_consistent_amap2 = "ng * Ftilda"
+        is_consistent_eq = " + ".join([is_consistent_amap1, is_consistent_amap2]) + " = gt_zero"
 
         # 4. RPSPS verify equations
         rpsps_eqs = []
         for attr_name in msp.index:
             if attr_name == "PSDO":
                 continue
-            S_amap1 = AMapBoth(Variable.reference(f"S_{attr_name}"), Variable.reference(f"z_{attr_name}"))
-            S_amap2 = AMapLeft(Variable.reference(f"Ssmile_{attr_name}"), Constant(ZpElement.init(-1)))
-            S_eq = MS1Equation(f"S_{attr_name}", [S_amap1, S_amap2], Constant(G1Element.zero()))
-            S_eq._validate()
+            S_amap1 = f"S_{attr_name} * z_{attr_name}"
+            S_amap2 = f"Ssmile_{attr_name} * z_minus_one"
+            S_eq = " + ".join([S_amap1, S_amap2]) + " = g1_zero"
 
-            R_amap1 = AMapRight(Constant(sk_ida_hat[attr_name]), Variable.reference(f"z_{attr_name}"))
-            R_amap2 = AMapLeft(Variable.reference(f"Rsmile_{attr_name}"), Constant(ZpElement.init(-1)))
-            R_eq = MS1Equation(f"R_{attr_name}", [R_amap1, R_amap2], Constant(G1Element.zero()))
-            R_eq._validate()
+            R_amap1 = f"randomized_sk_ida_{attr_name} * z_{attr_name}"
+            R_amap2 = f"Rsmile_{attr_name} * z_minus_one"
+            R_eq = " + ".join([R_amap1, R_amap2]) + " = g1_zero"
 
-            a_attr = ZpElement.from_str(attr_name)
-            constants[f"vk_attrs_{attr_name}_0"] = self.vk_attrs[attr_name][0]
-            constants[f"vk_attrs_{attr_name}_1"] = a_attr * self.vk_attrs[attr_name][1]
-            constants[f"vk_attrs_{attr_name}_2"] = ~self.vk_attrs[attr_name][2]
             V_amap1 = f"Rsmile_{attr_name} * Ftilda"
             V_amap2 = f"Rsmile_{attr_name} * vk_attrs_{attr_name}_0"
             V_amap3 = f"Rsmile_{attr_name} * vk_attrs_{attr_name}_1"
@@ -310,24 +335,20 @@ equations:
             rpsps_eqs.append(V_eq)
 
         # 5. psdo verify equations
-        sigma_amap1 = AMapBoth(Variable.reference("sigma"), Variable.reference("z_PSDO"))
-        sigma_amap2 = AMapLeft(Variable.reference("sigmasmile"), Constant(ZpElement.init(-1)))
-        sigma_eq = MS1Equation("sigma", [sigma_amap1, sigma_amap2], Constant(G1Element.zero()))
-        sigma_eq._validate()
+        sigma_amap1 = "sigma * z_PSDO"
+        sigma_amap2 = "sigmasmile * z_minus_one"
+        sigma_eq = " + ".join([sigma_amap1, sigma_amap2]) + " = g1_zero"
 
-        G_amap1 = AMapRight(Constant(self.g), Variable.reference("z_PSDO"))
-        G_amap2 = AMapLeft(Variable.reference("Gsmile"), Constant(ZpElement.init(-1)))
-        G_eq = MS1Equation("G", [G_amap1, G_amap2], Constant(G1Element.zero()))
-        G_eq._validate()
+        G_amap1 = "g * z_PSDO"
+        G_amap2 = "Gsmile * z_minus_one"
+        G_eq = " + ".join([G_amap1, G_amap2]) + " = g1_zero"
 
-        fbb_amap1 = AMapLeft(Variable.reference('sigmasmile'), Constant(self.vk_psdo[0] + self.vk_psdo[1] + psdo_attr * -self.h)) # TODO: This wont work!!!
-        #fbb_amap1 = AMapLeft(Variable.reference('sigmasmile'), Constant(self.vk_psdo[0] + self.vk_psdo[1] + ZpElement.random() * self.h)) # TODO: Could be anything?
-        fbb_amap2 = AMapLeft(Variable.reference('Gsmile'), Constant(self.h))
-        fbb_eq = PPEquation("fbb", [fbb_amap1, fbb_amap2], Constant(GTElement.zero()))
-        fbb_eq._validate()
+        # For FBB equation
+        fbb_amap1 = "sigmasmile * vk_psdo_combined"
+        fbb_amap2 = "Gsmile * h"
+        fbb_eq = " + ".join([fbb_amap1, fbb_amap2]) + " = gt_zero"
 
         psdo_eqs = [sigma_eq, G_eq, fbb_eq]
-
 
         eqs = msp_eqs + [tag_eq, is_consistent_eq] + rpsps_eqs + psdo_eqs
         verify = self.gs.verify(eqs, proof)
@@ -346,16 +367,12 @@ equations:
         return signature["tau"] == self.lit.sign(usk, ZpElement.init(recip))
 
     @property
-    def CRS(self):
-        return self.gs.CRS
-
-    @property
     def g(self):
-        return self.gs.g
+        return self.crs.g
 
     @property
     def h(self):
-        return self.gs.h
+        return self.crs.h
 
     @property
     def xk(self):

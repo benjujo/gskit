@@ -109,6 +109,14 @@ class CRS():
     @property
     def v2(self):
         return UnamedArray([self._v2])
+
+    @property
+    def g1(self):
+        return self._u1[0]
+    
+    @property
+    def g2(self):
+        return self._v1[0]
     
     def to_json(self):
         return json.dumps({
