@@ -368,11 +368,11 @@ equations:
 
     @property
     def g(self):
-        return self.crs.g
+        return self.crs.g1
 
     @property
     def h(self):
-        return self.crs.h
+        return self.crs.g2
 
     @property
     def xk(self):

@@ -30,3 +30,15 @@ class FBB():
         lhs = sigma.pair(vk[0] + r*vk[1] + m*self.h)
         rhs = self.g.pair(self.h)
         return lhs == rhs
+    
+    @gsfy
+    def z_is_zero_or_verify(self, vk: List[G2Element], m: ZpElement, signature: Tuple[G1Element, ZpElement]) -> bool:
+        sigma = signature[0]
+        r = signature[1]
+        
+        sigma_smile = z * sigma
+        G_smile = z * self.g
+        
+        lhs = sigma.pair(vk[0] + r*vk[1] + m*self.h)
+        rhs = self.g.pair(self.h)
+        return lhs == rhs
