@@ -27,7 +27,7 @@
         # Build PBC library from GitHub source
         pbc = pkgs.stdenv.mkDerivation rec {
           pname = "pbc";
-          version = "0.5.14";
+          version = "1.0.0";
           
           src = pbc-src;
           
