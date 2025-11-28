@@ -1,10 +1,11 @@
 from gskit.elements import ZpElement, G1Element, G2Element
 from typing import Tuple
 
-from gskit.gsfy import gsfy
+from gskit.gsfy import gsfy, crs_gsfy
 
 debug = False 
 
+@crs_gsfy
 class BLS():
     def __init__(self, g2=None):
         if g2 is None:
