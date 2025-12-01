@@ -24,8 +24,9 @@ class BLS():
 
         return sk * h
     
-    @gsfy
+    @gsfy(witness=['signature'])
     def verify(self, vk: G2Element, m: str, signature: G1Element) -> bool:
+        print(signature)
         g2 = self.g2
         lhs = signature.pair(g2)
         rhs = G1Element.hash_from_string(m).pair(vk)

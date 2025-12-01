@@ -219,8 +219,22 @@ def _process_legacy_mode(func: Callable, result: any, collected_values: dict,
         with open(output_file, 'w') as f:
             f.write(compiled)
     else:
+        # VERIFY mode: Load everything from proof JSON (witnesses, pis, thetas, etc.)
+        # then overwrite constants with locally computed values
+        # This prevents tampering - constants are public values computed by the verifier
         with open(proof_output_file, "r") as f:
             definitions = json.load(f)
+        
+        # Get constants that need to be overwritten
+        constants = r.consts
+        
+        # Overwrite constant values with local computation (not from proof!)
+        # This ensures public values cannot be tampered with
+        for const in constants:
+            if const.name in collected_values and collected_values[const.name] is not None:
+                definitions[const.name] = collected_values[const.name].__json__()
+            else:
+                print(f"Warning: Constant '{const.name}' not computed locally")
         
         compiled = r.compile_verify(definitions, crs, "elements")
         with open(verify_output_file, 'w') as f:
@@ -229,24 +243,99 @@ def _process_legacy_mode(func: Callable, result: any, collected_values: dict,
     return result
 
 
+def _find_nested_gsfy_functions(func: Callable) -> list:
+    """
+    Recursively find all nested functions decorated with @gsfy.
+    Returns a list of tuples: (function_name, gs_string)
+    """
+    nested_gs_strings = []
+    
+    try:
+        source = inspect.getsource(func)
+        tree = ast.parse(source)
+        
+        # Find the function definition node
+        func_def = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == func.__name__:
+                func_def = node
+                break
+        
+        if not func_def:
+            return nested_gs_strings
+        
+        # Recursively walk through nested function definitions
+        def visit_nested_functions(node):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.FunctionDef):
+                    # Check if this nested function has @gsfy decorator
+                    has_gsfy = False
+                    for decorator in child.decorator_list:
+                        decorator_name = None
+                        if isinstance(decorator, ast.Name):
+                            decorator_name = decorator.id
+                        elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name):
+                            decorator_name = decorator.func.id
+                        
+                        if decorator_name == 'gsfy':
+                            has_gsfy = True
+                            break
+                    
+                    if has_gsfy:
+                        # Extract GS_STRING from this nested function
+                        for stmt in child.body:
+                            if isinstance(stmt, ast.Assign):
+                                for target in stmt.targets:
+                                    if isinstance(target, ast.Name) and target.id == 'GS_STRING':
+                                        gs_string = None
+                                        if isinstance(stmt.value, ast.Constant):
+                                            gs_string = stmt.value.value
+                                        elif isinstance(stmt.value, ast.Str):  # Python < 3.8
+                                            gs_string = stmt.value.s
+                                        
+                                        if gs_string:
+                                            nested_gs_strings.append((child.name, gs_string))
+                    
+                    # Recursively visit nested functions within this function
+                    visit_nested_functions(child)
+        
+        visit_nested_functions(func_def)
+        
+    except Exception as e:
+        print(f"Warning: Error finding nested @gsfy functions: {e}")
+    
+    return nested_gs_strings
+
+
 def _process_modular_mode(func: Callable, result: any, collected_values: dict, 
                          source_file: str, base_name: str):
     """
     Modular mode: register with global GSContext instead of compiling immediately.
+    Recursively searches for nested functions decorated with @gsfy and combines their GS_STRINGs.
     """
     gs_string = collected_values.get('GS_STRING', None)
     if not gs_string:
         return result
     
+    # Find all nested @gsfy decorated functions and collect their GS_STRINGs
+    nested_gs_functions = _find_nested_gsfy_functions(func)
+    
+    # Combine all GS_STRINGs: parent + all nested ones
+    combined_gs_string = gs_string
+    if nested_gs_functions:
+        for nested_name, nested_gs_string in nested_gs_functions:
+            # Combine with logical AND
+            combined_gs_string = f"({combined_gs_string}) /\\ ({nested_gs_string})"
+    
     # Get module name from source file
     module_name = os.path.splitext(os.path.basename(source_file))[0]
     func_name = func.__name__
     
-    # Extract variables and constants that are referenced in GS_STRING
+    # Extract variables and constants that are referenced in the combined GS_STRING
     # We need to parse the GS_STRING to know which variables/constants to collect
     parser = GSParser()
     try:
-        parsed = parser.parse(gs_string)
+        parsed = parser.parse(combined_gs_string)
         transformer = ASTTransformer()
         ast = transformer.transform(parsed)
         
@@ -260,14 +349,17 @@ def _process_modular_mode(func: Callable, result: any, collected_values: dict,
             if const.name in collected_values and collected_values[const.name] is not None:
                 variable_values[const.name] = collected_values[const.name]
         
-        # Register with global context
+        # Register with global context using the combined GS_STRING
         context = GSContext.get_instance()
         context.register_function(
             func_name=func_name,
             module_name=module_name,
-            gs_string=gs_string,
+            gs_string=combined_gs_string,
             variable_values=variable_values
         )
+        
+        if nested_gs_functions:
+            print(f"Modular mode: Combined {len(nested_gs_functions)} nested @gsfy function(s) into {func_name}")
         
     except Exception as e:
         print(f"Warning: Error processing GS_STRING in modular mode: {e}")
@@ -276,7 +368,7 @@ def _process_modular_mode(func: Callable, result: any, collected_values: dict,
     return result
 
 
-def gsfy(func: Optional[Callable] = None, *, modular: bool = False):
+def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Optional[list] = None):
     """
     Decorator for Groth-Sahai proof generation.
     
@@ -285,13 +377,16 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False):
     - Legacy mode: Processes and compiles immediately (backward compatible)
     
     Usage:
-        @gsfy                    # Modular mode (default)
-        @gsfy(modular=True)      # Explicit modular mode
-        @gsfy(modular=False)     # Legacy mode
+        @gsfy                               # Modular mode (default)
+        @gsfy(modular=True)                 # Explicit modular mode
+        @gsfy(modular=False)                # Legacy mode
+        @gsfy(witness=['signature'])        # Specify witness variables
+        @gsfy(modular=True, witness=['x'])  # Combine parameters
     
     Args:
         func: Function to decorate (when used as @gsfy)
         modular: If True, register with global context; if False, compile immediately
+        witness: List of parameter names that are witness variables (optional in VERIFY mode)
     
     Environment variables (can be set in shell or Python):
         GS_MODE: Must be "PROOF" or "VERIFY" (required for legacy mode)
@@ -301,45 +396,72 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False):
         GS_CRS: CRS file path
     """
     def decorator(f: Callable):
+        # Get the original function signature
+        sig = inspect.signature(f)
+        
+        # Determine witness variables from decorator parameter or GS_STRING
+        witness_vars = set(witness) if witness else set()
+        
+        # If no explicit witness list, try to extract from GS_STRING at decoration time
+        if not witness_vars:
+            gs_string, auto_witness_vars = _extract_gs_string_and_witnesses(f)
+            witness_vars = auto_witness_vars
+        
+        # Create a modified signature where witness parameters are optional (have defaults)
+        new_params = []
+        for param_name, param in sig.parameters.items():
+            if param_name in witness_vars:
+                # Make witness parameters optional with None default
+                new_param = param.replace(default=None)
+                new_params.append(new_param)
+            else:
+                new_params.append(param)
+        
+        new_sig = sig.replace(parameters=new_params)
+        
         @wraps(f)
         def wrapper(*args, **kwargs):
             # Check if we're in VERIFY mode and need to inject dummy values for witnesses
             gs_mode = _get_env_or_python_var("GS_MODE", None)
-            if gs_mode == "VERIFY":
-                # Extract GS_STRING and identify witness variables
-                gs_string, witness_vars = _extract_gs_string_and_witnesses(f)
+            
+            # Check if any witness parameters are missing or None
+            if witness_vars:
+                param_names = list(sig.parameters.keys())
+                num_positional = len(args)
+                provided_by_args = set(param_names[:num_positional])
+                provided_by_kwargs = set(kwargs.keys())
                 
-                if witness_vars:
-                    # Get function signature to see which parameters are witness variables
-                    sig = inspect.signature(f)
-                    param_names = list(sig.parameters.keys())
-                    
-                    # Determine which parameters are provided via args
-                    # (accounting for 'self' if it's a method)
-                    num_positional = len(args)
-                    provided_by_args = set(param_names[:num_positional])
-                    
-                    # Parameters provided via kwargs
-                    provided_by_kwargs = set(kwargs.keys())
-                    
-                    # For witness variables that are function parameters, inject dummy values
-                    # if they're not provided (or are None)
-                    # In VERIFY mode, witness variables (like 'signature') are not available to the verifier
-                    # (they only have Groth-Sahai proof commitments), so we use dummy values to allow
-                    # the function to execute and extract constants needed for GS compilation
-                    for witness_var in witness_vars:
-                        if witness_var in sig.parameters:
-                            # Check if provided via positional or keyword arguments
-                            is_provided = (witness_var in provided_by_args or 
-                                         witness_var in provided_by_kwargs)
-                            
-                            # Check if it's explicitly None (if provided via kwargs)
-                            is_none = (witness_var in kwargs and kwargs[witness_var] is None)
-                            
-                            # Inject dummy if not provided, or if explicitly None
-                            if not is_provided or is_none:
-                                dummy_value = _create_dummy_value_for_type(witness_var, gs_string)
-                                kwargs[witness_var] = dummy_value
+                missing_witnesses = []
+                for witness_var in witness_vars:
+                    if witness_var in sig.parameters:
+                        is_provided = (witness_var in provided_by_args or 
+                                     witness_var in provided_by_kwargs)
+                        is_none = (witness_var in kwargs and kwargs[witness_var] is None)
+                        
+                        if not is_provided or is_none:
+                            missing_witnesses.append(witness_var)
+                
+                # Handle missing witnesses based on mode
+                if missing_witnesses:
+                    if gs_mode == "VERIFY":
+                        # VERIFY mode: inject dummy values for witnesses
+                        gs_string, _ = _extract_gs_string_and_witnesses(f)
+                        
+                        for witness_var in missing_witnesses:
+                            dummy_value = _create_dummy_value_for_type(witness_var, gs_string)
+                            kwargs[witness_var] = dummy_value
+                    else:
+                        # PROOF mode or normal execution: raise standard Python TypeError
+                        num_missing = len(missing_witnesses)
+                        if num_missing == 1:
+                            raise TypeError(
+                                f"{f.__name__}() missing 1 required positional argument: '{missing_witnesses[0]}'"
+                            )
+                        else:
+                            args_str = ", ".join(f"'{w}'" for w in missing_witnesses)
+                            raise TypeError(
+                                f"{f.__name__}() missing {num_missing} required positional arguments: {args_str}"
+                            )
             
             # Execute function and capture locals
             result, local_vars = _capture_function_locals(f, *args, **kwargs)
@@ -356,6 +478,9 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False):
                 return _process_modular_mode(f, result, collected_values, source_file, base_name)
             else:
                 return _process_legacy_mode(f, result, collected_values, source_file, base_name)
+        
+        # Apply the modified signature to the wrapper
+        wrapper.__signature__ = new_sig
         
         return wrapper
     
@@ -407,6 +532,7 @@ def crs_gsfy(cls):
         if gs_mode in ["PROOF", "VERIFY"]:
             # Load CRS from environment
             crs_file = _get_env_or_python_var("GS_CRS", "crs.json")
+            print(f"Warning: Using a preloaded CRS from {crs_file}\nGS_MODE={gs_mode}")
             try:
                 with open(crs_file, "r") as f:
                     crs_data = json.load(f)
