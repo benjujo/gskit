@@ -170,7 +170,7 @@ def _collect_variable_values(func: Callable, local_vars: dict) -> dict:
 
 
 def _process_legacy_mode(func: Callable, result: any, collected_values: dict, 
-                        source_file: str, base_name: str):
+                        source_file: str, base_name: str, aliases: Optional[dict] = None):
     """
     Legacy mode: process and compile immediately (backward compatible).
     """
@@ -211,9 +211,16 @@ def _process_legacy_mode(func: Callable, result: any, collected_values: dict,
         constants = r.consts
         
         for var in variables:
-            definitions[var.name] = collected_values[var.name].__json__()
+            value = collected_values[var.name].__json__()
+            # Apply alias if specified
+            key = aliases.get(var.name, var.name) if aliases else var.name
+            definitions[key] = value
+            
         for const in constants:
-            definitions[const.name] = collected_values[const.name].__json__()
+            value = collected_values[const.name].__json__()
+            # Apply alias if specified
+            key = aliases.get(const.name, const.name) if aliases else const.name
+            definitions[key] = value
         
         compiled = r.compile_proof(definitions, crs, "elements")
         with open(output_file, 'w') as f:
@@ -232,7 +239,10 @@ def _process_legacy_mode(func: Callable, result: any, collected_values: dict,
         # This ensures public values cannot be tampered with
         for const in constants:
             if const.name in collected_values and collected_values[const.name] is not None:
-                definitions[const.name] = collected_values[const.name].__json__()
+                value = collected_values[const.name].__json__()
+                # Apply alias if specified (constants may be aliased in the proof JSON)
+                key = aliases.get(const.name, const.name) if aliases else const.name
+                definitions[key] = value
             else:
                 print(f"Warning: Constant '{const.name}' not computed locally")
         
@@ -308,7 +318,7 @@ def _find_nested_gsfy_functions(func: Callable) -> list:
 
 
 def _process_modular_mode(func: Callable, result: any, collected_values: dict, 
-                         source_file: str, base_name: str):
+                         source_file: str, base_name: str, aliases: Optional[dict] = None):
     """
     Modular mode: register with global GSContext instead of compiling immediately.
     Recursively searches for nested functions decorated with @gsfy and combines their GS_STRINGs.
@@ -343,11 +353,15 @@ def _process_modular_mode(func: Callable, result: any, collected_values: dict,
         variable_values = {}
         for var in ast.vars:
             if var.name in collected_values and collected_values[var.name] is not None:
-                variable_values[var.name] = collected_values[var.name]
+                # Apply alias if specified
+                key = aliases.get(var.name, var.name) if aliases else var.name
+                variable_values[key] = collected_values[var.name]
         
         for const in ast.consts:
             if const.name in collected_values and collected_values[const.name] is not None:
-                variable_values[const.name] = collected_values[const.name]
+                # Apply alias if specified  
+                key = aliases.get(const.name, const.name) if aliases else const.name
+                variable_values[key] = collected_values[const.name]
         
         # Register with global context using the combined GS_STRING
         context = GSContext.get_instance()
@@ -368,7 +382,7 @@ def _process_modular_mode(func: Callable, result: any, collected_values: dict,
     return result
 
 
-def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Optional[list] = None):
+def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Optional[list] = None, aliases: Optional[dict] = None):
     """
     Decorator for Groth-Sahai proof generation.
     
@@ -377,16 +391,28 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
     - Legacy mode: Processes and compiles immediately (backward compatible)
     
     Usage:
-        @gsfy                               # Modular mode (default)
-        @gsfy(modular=True)                 # Explicit modular mode
-        @gsfy(modular=False)                # Legacy mode
-        @gsfy(witness=['signature'])        # Specify witness variables
-        @gsfy(modular=True, witness=['x'])  # Combine parameters
+        @gsfy                                        # Modular mode (default)
+        @gsfy(modular=True)                          # Explicit modular mode
+        @gsfy(modular=False)                         # Legacy mode
+        @gsfy(witness=['signature'])                 # Specify witness variables
+        
+        # Aliases - two ways:
+        @gsfy(aliases={'signature': 'tag'})          # Decorator-level (fixed)
+        func(..., _gs_aliases={'signature': 'tag'})  # Call-site (flexible)
+        
+        @gsfy(witness=['x'], aliases={'x': 'r'})     # Combine parameters
     
     Args:
         func: Function to decorate (when used as @gsfy)
         modular: If True, register with global context; if False, compile immediately
         witness: List of parameter names that are witness variables (optional in VERIFY mode)
+        aliases: Dict mapping internal names to external names (decorator-level, fixed at decoration)
+                 e.g., {'signature': 'tag'} means 'signature' in GS_STRING becomes 'tag' externally
+    
+    Call-site aliases (more flexible):
+        Pass _gs_aliases={'internal': 'external'} as a keyword argument to override decorator aliases.
+        This allows the same component to be used with different names in different contexts.
+        Example: result = verify(vk, m, sig, _gs_aliases={'signature': 'token'})
     
     Environment variables (can be set in shell or Python):
         GS_MODE: Must be "PROOF" or "VERIFY" (required for legacy mode)
@@ -421,6 +447,10 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
         
         @wraps(f)
         def wrapper(*args, **kwargs):
+            # Extract call-site aliases if provided (overrides decorator aliases)
+            call_site_aliases = kwargs.pop('_gs_aliases', None)
+            effective_aliases = call_site_aliases if call_site_aliases is not None else aliases
+            
             # Check if we're in VERIFY mode and need to inject dummy values for witnesses
             gs_mode = _get_env_or_python_var("GS_MODE", None)
             
@@ -475,9 +505,9 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
             
             # Process based on mode
             if modular:
-                return _process_modular_mode(f, result, collected_values, source_file, base_name)
+                return _process_modular_mode(f, result, collected_values, source_file, base_name, effective_aliases)
             else:
-                return _process_legacy_mode(f, result, collected_values, source_file, base_name)
+                return _process_legacy_mode(f, result, collected_values, source_file, base_name, effective_aliases)
         
         # Apply the modified signature to the wrapper
         wrapper.__signature__ = new_sig
