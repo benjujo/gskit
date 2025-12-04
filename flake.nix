@@ -2,7 +2,8 @@
   description = "GSKit - Cryptographic toolkit with PBC and Charm";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-23.11";
+    nixpkgs-linux.url = "github:NixOS/nixpkgs/nixos-23.11";
+    nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-23.11-darwin";
     flake-utils.url = "github:numtide/flake-utils";
     
     # PBC from GitHub as separate flake
@@ -18,10 +19,17 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, pbc-src, charm-src }:
+  outputs = { self, nixpkgs-linux, nixpkgs-darwin, flake-utils, pbc-src, charm-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs =
+          let
+            nixpkgsForSystem =
+              if builtins.elem system [ "x86_64-darwin" "aarch64-darwin" ]
+              then nixpkgs-darwin
+              else nixpkgs-linux;
+          in
+            nixpkgsForSystem.legacyPackages.${system};
         python = pkgs.python310;
 
         # Build PBC library from GitHub source
