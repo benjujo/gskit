@@ -1,291 +1,217 @@
 """
-Global context for modular Groth-Sahai DSL collection.
-Allows multiple @gsfy decorated functions to contribute to a single GS proof system.
+GSContext: Collects GS_STRING fragments and merges them into a single proof.
+
+Usage:
+    ctx = GSContext(crs)
+
+    # Add @gsfy decorated functions with optional aliases
+    lit.verify.gs_add(ctx, vk=vk, m=m, signature=tag,
+                      aliases={'signature': 'tag'})
+
+    rpsps.z_is_zero_or_verify.gs_add(ctx, vk=vk1, ...,
+                                      aliases={'R_tilde': 'R_tilde_attr1', ...})
+
+    # Finalize: merge, parse, type-check
+    gs_node = ctx.finalize()
+
+    # Compile
+    proof_code = gs_node.compile_proof(ctx.definitions, crs_dict, "elements")
 """
-import os
-import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Any, Optional
+from gskit.framework import CRS
 from gskit.parser import GSParser
 from gskit.ast_builder import ASTTransformer
-from gskit.framework import CRS
 
 
 class GSContext:
     """
-    Global context that collects GS_STRING fragments and variables from multiple
-    decorated functions. Provides methods to merge and compile them together.
+    Collects GS_STRING fragments and their values from multiple @gsfy calls.
+    Merges them into a single AST for proof generation.
     """
-    
-    _instance: Optional['GSContext'] = None
-    
-    def __init__(self):
-        self.gs_strings: List[str] = []  # List of GS_STRING fragments
-        self.variable_values: Dict[str, any] = {}  # Collected variable values across all functions
-        self.function_registry: List[Dict] = []  # Metadata about each decorated function
-        self._finalized = False
-        
-    @classmethod
-    def get_instance(cls) -> 'GSContext':
-        """Get or create the singleton instance."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-    
-    @classmethod
-    def reset(cls):
-        """Reset the context (useful for testing or multiple runs)."""
-        cls._instance = None
-    
-    def register_function(self, func_name: str, module_name: str, gs_string: str, 
-                          variable_values: Dict[str, any]):
+
+    def __init__(self, crs: CRS):
+        self.crs = crs
+        self.fragments: List[Dict] = []  # List of {gs_string, values, aliases}
+
+    def add(self, gs_string: str, values: Dict[str, Any], aliases: Optional[Dict[str, str]] = None):
         """
-        Register a decorated function's GS_STRING and variables.
-        
+        Add a GS_STRING fragment with its values.
+
         Args:
-            func_name: Name of the decorated function
-            module_name: Name of the module/file containing the function
-            gs_string: The GS_STRING from this function
-            variable_values: Dictionary of variable names to their values
+            gs_string: The GS_STRING defining variables, constants, equations
+            values: Dict mapping names to Element values
+            aliases: Optional dict mapping original names to new names
+                     e.g., {'signature': 'tag'} renames 'signature' to 'tag'
         """
-        if self._finalized:
-            raise RuntimeError("Cannot register functions after context is finalized")
-        
-        self.gs_strings.append(gs_string)
-        self.variable_values.update(variable_values)
-        self.function_registry.append({
-            'func_name': func_name,
-            'module_name': module_name,
-            'gs_string': gs_string
+        self.fragments.append({
+            'gs_string': gs_string,
+            'values': values,
+            'aliases': aliases or {}
         })
-    
-    def merge_gs_strings(self) -> str:
-        """
-        Merge all GS_STRING fragments into a single combined GS_STRING.
-        Handles deduplication of variables and constants.
-        
-        Returns:
-            Combined GS_STRING ready for parsing
-        """
-        if not self.gs_strings:
-            return None
-        
-        # Parse each fragment to extract components
+
+    def _apply_aliases(self, gs_string: str, aliases: Dict[str, str]) -> str:
+        """Apply name aliases to a GS_STRING."""
+        result = gs_string
+        for old_name, new_name in aliases.items():
+            # Replace whole words only (simple approach)
+            # This replaces in variable declarations, constant declarations, and equations
+            import re
+            result = re.sub(r'\b' + re.escape(old_name) + r'\b', new_name, result)
+        return result
+
+    def _apply_aliases_to_values(self, values: Dict[str, Any], aliases: Dict[str, str]) -> Dict[str, Any]:
+        """Apply name aliases to values dict."""
+        result = {}
+        for name, value in values.items():
+            new_name = aliases.get(name, name)
+            result[new_name] = value
+        return result
+
+    def _merge_gs_strings(self) -> str:
+        """Merge all GS_STRING fragments into one."""
+        if not self.fragments:
+            raise ValueError("No GS_STRING fragments to merge")
+
         parser = GSParser()
-        all_vars = {}  # name -> (type, source_module)
-        all_consts = {}  # name -> (type, source_module)
-        all_eqs = []  # List of equation strings
-        
-        for i, gs_string in enumerate(self.gs_strings):
+        all_vars = {}   # name -> type_str
+        all_consts = {} # name -> type_str
+        all_eqs = []    # equation strings
+
+        for fragment in self.fragments:
+            gs_string = self._apply_aliases(fragment['gs_string'], fragment['aliases'])
+
+            # Parse to extract components
             try:
                 parsed = parser.parse(gs_string)
                 transformer = ASTTransformer()
                 ast = transformer.transform(parsed)
-                
-                # Collect variables
+
+                # Collect variables with their types
                 for var in ast.vars:
+                    var_type = self._get_type_str(var)
                     if var.name in all_vars:
-                        # Check for type conflicts
-                        existing_type = type(var).__name__
-                        new_type = type(var).__name__
-                        if existing_type != new_type:
-                            raise ValueError(
-                                f"Variable '{var.name}' has conflicting types: "
-                                f"{existing_type} vs {new_type}"
+                        if all_vars[var.name] != var_type:
+                            raise TypeError(
+                                f"Variable '{var.name}' declared with conflicting types: "
+                                f"{all_vars[var.name]} vs {var_type}"
                             )
                     else:
-                        all_vars[var.name] = (var, self.function_registry[i]['module_name'])
-                
-                # Collect constants
+                        all_vars[var.name] = var_type
+
+                # Collect constants with their types
                 for const in ast.consts:
+                    const_type = self._get_type_str(const)
                     if const.name in all_consts:
-                        existing_type = type(const).__name__
-                        new_type = type(const).__name__
-                        if existing_type != new_type:
-                            raise ValueError(
-                                f"Constant '{const.name}' has conflicting types: "
-                                f"{existing_type} vs {new_type}"
+                        if all_consts[const.name] != const_type:
+                            raise TypeError(
+                                f"Constant '{const.name}' declared with conflicting types: "
+                                f"{all_consts[const.name]} vs {const_type}"
                             )
                     else:
-                        all_consts[const.name] = (const, self.function_registry[i]['module_name'])
-                
-                # Collect equations from AST
+                        all_consts[const.name] = const_type
+
+                # Collect equations
                 for eq in ast.eqs:
-                    # Reconstruct equation string from AST
-                    eq_parts = []
-                    for mul_eq in eq.eq_muls:
-                        if mul_eq.gamma:
-                            eq_parts.append(f"{mul_eq.left} * {mul_eq.right} * {mul_eq.gamma}")
-                        else:
-                            eq_parts.append(f"{mul_eq.left} * {mul_eq.right}")
-                    eq_str = " + ".join(eq_parts) + f" = {eq.target}"
+                    eq_str = self._equation_to_string(eq)
                     all_eqs.append(eq_str)
-                            
+
             except Exception as e:
-                raise RuntimeError(
-                    f"Error parsing GS_STRING from {self.function_registry[i]['module_name']}: {e}"
-                )
-        
-        # Build the merged GS_STRING
-        var_lines = []
-        for var_name, (var, _) in all_vars.items():
-            # Determine type string from variable class
-            if 'G1' in type(var).__name__:
-                var_type = 'G1'
-            elif 'G2' in type(var).__name__:
-                var_type = 'G2'
-            elif 'Zp' in type(var).__name__:
-                var_type = 'ZP'
-            else:
-                var_type = 'ZP'  # default
-            var_lines.append(f"    {var_name}: {var_type}")
-        
-        const_lines = []
-        for const_name, (const, _) in all_consts.items():
-            # Determine type string from constant class
-            if 'G1' in type(const).__name__:
-                const_type = 'G1'
-            elif 'G2' in type(const).__name__:
-                const_type = 'G2'
-            elif 'GT' in type(const).__name__:
-                const_type = 'GT'
-            elif 'Zp' in type(const).__name__:
-                const_type = 'ZP'
-            else:
-                const_type = 'ZP'  # default
-            const_lines.append(f"    {const_name}: {const_type}")
-        
+                raise RuntimeError(f"Error parsing GS_STRING: {e}\n{gs_string}")
+
+        # Build merged GS_STRING
+        var_lines = [f"    {name}: {typ}" for name, typ in all_vars.items()]
+        const_lines = [f"    {name}: {typ}" for name, typ in all_consts.items()]
+        eq_lines = [f"    {eq}" for eq in all_eqs]
+
         merged = "variables:\n"
-        merged += "\n".join(var_lines) if var_lines else "    # No variables"
+        merged += "\n".join(var_lines) if var_lines else "    # none"
         merged += "\n\nconstants:\n"
-        merged += "\n".join(const_lines) if const_lines else "    # No constants"
+        merged += "\n".join(const_lines) if const_lines else "    # none"
         merged += "\n\nequations:\n"
-        merged += "\n    ".join(all_eqs) if all_eqs else "    # No equations"
+        merged += "\n".join(eq_lines) if eq_lines else "    # none"
         merged += "\n"
-        
+
         return merged
-    
-    def finalize(self, output_file: Optional[str] = None, 
-                 proof_output_file: Optional[str] = None,
-                 verify_output_file: Optional[str] = None,
-                 crs_file: Optional[str] = None) -> Dict:
-        """
-        Finalize the context by merging all GS_STRINGs and compiling.
-        
-        Args:
-            output_file: Output file for proof compilation
-            proof_output_file: Input file for verify mode (contains proof JSON)
-            verify_output_file: Output file for verify compilation
-            crs_file: Path to CRS JSON file
-            
-        Returns:
-            Dictionary with 'compiled_proof' and/or 'compiled_verify' code
-        """
-        if self._finalized:
-            raise RuntimeError("Context already finalized")
-        
-        gs_mode = os.environ.get("GS_MODE", None)
-        if gs_mode not in ["PROOF", "VERIFY"]:
-            raise ValueError("GS_MODE must be set to PROOF or VERIFY")
-        
-        # Set default file names if not provided
-        if output_file is None:
-            output_file = os.environ.get("GS_OUTPUT", "combined_proof.py")
-        if proof_output_file is None:
-            proof_output_file = os.environ.get("GS_PROOF_OUTPUT", "combined_proof.json")
-        if verify_output_file is None:
-            verify_output_file = os.environ.get("GS_VERIFY_OUTPUT", "combined_verify.py")
-        if crs_file is None:
-            crs_file = os.environ.get("GS_CRS", "crs.json")
-        
-        # Load CRS
+
+    def _get_type_str(self, node) -> str:
+        """Get type string from a node."""
+        class_name = type(node).__name__
+        if 'G1' in class_name:
+            return 'G1'
+        elif 'G2' in class_name:
+            return 'G2'
+        elif 'GT' in class_name:
+            return 'GT'
+        elif 'Zp' in class_name or 'ZP' in class_name:
+            return 'ZP'
+        return 'ZP'  # default
+
+    def _equation_to_string(self, eq) -> str:
+        """Convert an equation AST node back to string."""
+        parts = []
+        for mul in eq.eq_muls:
+            if mul.gamma:
+                parts.append(f"{mul.left} * {mul.right} * {mul.gamma}")
+            else:
+                parts.append(f"{mul.left} * {mul.right}")
+        return " + ".join(parts) + f" = {eq.target}"
+
+    def _collect_values(self) -> Dict[str, Any]:
+        """Collect all values, applying aliases and checking for conflicts."""
+        all_values = {}
+
+        for fragment in self.fragments:
+            values = self._apply_aliases_to_values(fragment['values'], fragment['aliases'])
+
+            for name, value in values.items():
+                if name in all_values:
+                    # Check if same value (by comparison)
+                    if not self._values_equal(all_values[name], value):
+                        raise ValueError(
+                            f"Name '{name}' used with different values"
+                        )
+                else:
+                    all_values[name] = value
+
+        return all_values
+
+    def _values_equal(self, v1, v2) -> bool:
+        """Check if two Element values are equal."""
         try:
-            with open(crs_file, "r") as f:
-                crs = json.load(f)
-        except Exception as e:
-            raise RuntimeError(f"Error loading CRS from {crs_file}: {e}")
-        
-        # Merge GS_STRINGs
-        merged_gs_string = self.merge_gs_strings()
-        if not merged_gs_string:
-            raise RuntimeError("No GS_STRING fragments to merge")
-        
-        # Parse and transform
+            return v1 == v2
+        except:
+            # If comparison fails, assume different
+            return False
+
+    @property
+    def definitions(self) -> Dict[str, str]:
+        """Get definitions dict (name -> JSON serialized value) for compilation."""
+        values = self._collect_values()
+        return {name: val.__json__() for name, val in values.items()}
+
+    def finalize(self):
+        """
+        Merge all fragments, parse, and type-check.
+
+        Returns:
+            GSNode ready for compile_proof() or compile_verify()
+        """
+        # Validate values first
+        self._collect_values()
+
+        # Merge and parse
+        merged_string = self._merge_gs_strings()
+
         parser = GSParser()
-        parsed = parser.parse(merged_gs_string)
+        parsed = parser.parse(merged_string)
         transformer = ASTTransformer()
         ast = transformer.transform(parsed)
-        
-        # Type check
+
+        # Type check (this validates equation types, etc.)
         ast.type_check()
-        
-        result = {}
-        
-        if gs_mode == "PROOF":
-            # Create definitions from collected variable values
-            definitions = {}
-            for var in ast.vars:
-                if var.name not in self.variable_values:
-                    raise ValueError(f"Variable '{var.name}' not found in collected values")
-                definitions[var.name] = self.variable_values[var.name].__json__()
-            
-            for const in ast.consts:
-                if const.name not in self.variable_values:
-                    raise ValueError(f"Constant '{const.name}' not found in collected values")
-                definitions[const.name] = self.variable_values[const.name].__json__()
-            
-            compiled = ast.compile_proof(definitions, crs, "elements")
-            result['compiled_proof'] = compiled
-            
-            with open(output_file, 'w') as f:
-                f.write(compiled)
-            
-        else:  # VERIFY mode
-            with open(proof_output_file, "r") as f:
-                definitions = json.load(f)
-            
-            compiled = ast.compile_verify(definitions, crs, "elements")
-            result['compiled_verify'] = compiled
-            
-            with open(verify_output_file, 'w') as f:
-                f.write(compiled)
-        
-        self._finalized = True
-        return result
-    
+
+        return ast
+
     def get_merged_string(self) -> str:
-        """Get the merged GS_STRING without finalizing."""
-        return self.merge_gs_strings()
-    
-    def clear(self):
-        """Clear all collected data (useful for testing)."""
-        self.gs_strings.clear()
-        self.variable_values.clear()
-        self.function_registry.clear()
-        self._finalized = False
-
-
-def finalize_gs_context(output_file: str = None, 
-                        proof_output_file: str = None,
-                        verify_output_file: str = None,
-                        crs_file: str = None) -> Dict:
-    """
-    Convenience function to finalize the global GS context.
-    Call this after all @gsfy decorated functions have been executed.
-    
-    Args:
-        output_file: Output file for proof compilation
-        proof_output_file: Input file for verify mode (contains proof JSON)
-        verify_output_file: Output file for verify compilation
-        crs_file: Path to CRS JSON file
-        
-    Returns:
-        Dictionary with compilation results
-    """
-    context = GSContext.get_instance()
-    return context.finalize(
-        output_file=output_file,
-        proof_output_file=proof_output_file,
-        verify_output_file=verify_output_file,
-        crs_file=crs_file
-    )
-
+        """Get the merged GS_STRING (for debugging)."""
+        return self._merge_gs_strings()

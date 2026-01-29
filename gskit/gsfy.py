@@ -385,35 +385,45 @@ def _process_modular_mode(func: Callable, result: any, collected_values: dict,
 def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Optional[list] = None, aliases: Optional[dict] = None):
     """
     Decorator for Groth-Sahai proof generation.
-    
+
     Supports two modes:
     - Modular mode (default): Registers with global GSContext for composition
     - Legacy mode: Processes and compiles immediately (backward compatible)
-    
+
     Usage:
         @gsfy                                        # Modular mode (default)
         @gsfy(modular=True)                          # Explicit modular mode
         @gsfy(modular=False)                         # Legacy mode
         @gsfy(witness=['signature'])                 # Specify witness variables
-        
+
         # Aliases - two ways:
         @gsfy(aliases={'signature': 'tag'})          # Decorator-level (fixed)
         func(..., _gs_aliases={'signature': 'tag'})  # Call-site (flexible)
-        
+
         @gsfy(witness=['x'], aliases={'x': 'r'})     # Combine parameters
-    
+
+    The decorated function also gets a .gs_add() method for GSContext composition:
+
+        ctx = GSContext(crs)
+
+        # Add to context with aliases for this specific call
+        obj.method.gs_add(ctx, arg1, arg2, aliases={'old': 'new'})
+
+        # Finalize and compile
+        ast = ctx.finalize()
+
     Args:
         func: Function to decorate (when used as @gsfy)
         modular: If True, register with global context; if False, compile immediately
         witness: List of parameter names that are witness variables (optional in VERIFY mode)
         aliases: Dict mapping internal names to external names (decorator-level, fixed at decoration)
                  e.g., {'signature': 'tag'} means 'signature' in GS_STRING becomes 'tag' externally
-    
+
     Call-site aliases (more flexible):
         Pass _gs_aliases={'internal': 'external'} as a keyword argument to override decorator aliases.
         This allows the same component to be used with different names in different contexts.
         Example: result = verify(vk, m, sig, _gs_aliases={'signature': 'token'})
-    
+
     Environment variables (can be set in shell or Python):
         GS_MODE: Must be "PROOF" or "VERIFY" (required for legacy mode)
         GS_OUTPUT: Output file for proof compilation
@@ -424,15 +434,17 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
     def decorator(f: Callable):
         # Get the original function signature
         sig = inspect.signature(f)
-        
+
         # Determine witness variables from decorator parameter or GS_STRING
         witness_vars = set(witness) if witness else set()
-        
-        # If no explicit witness list, try to extract from GS_STRING at decoration time
+
+        # Extract GS_STRING at decoration time
+        gs_string_from_source, auto_witness_vars = _extract_gs_string_and_witnesses(f)
+
+        # If no explicit witness list, use auto-detected ones
         if not witness_vars:
-            gs_string, auto_witness_vars = _extract_gs_string_and_witnesses(f)
             witness_vars = auto_witness_vars
-        
+
         # Create a modified signature where witness parameters are optional (have defaults)
         new_params = []
         for param_name, param in sig.parameters.items():
@@ -442,41 +454,41 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
                 new_params.append(new_param)
             else:
                 new_params.append(param)
-        
+
         new_sig = sig.replace(parameters=new_params)
-        
+
         @wraps(f)
         def wrapper(*args, **kwargs):
             # Extract call-site aliases if provided (overrides decorator aliases)
             call_site_aliases = kwargs.pop('_gs_aliases', None)
             effective_aliases = call_site_aliases if call_site_aliases is not None else aliases
-            
+
             # Check if we're in VERIFY mode and need to inject dummy values for witnesses
             gs_mode = _get_env_or_python_var("GS_MODE", None)
-            
+
             # Check if any witness parameters are missing or None
             if witness_vars:
                 param_names = list(sig.parameters.keys())
                 num_positional = len(args)
                 provided_by_args = set(param_names[:num_positional])
                 provided_by_kwargs = set(kwargs.keys())
-                
+
                 missing_witnesses = []
                 for witness_var in witness_vars:
                     if witness_var in sig.parameters:
-                        is_provided = (witness_var in provided_by_args or 
+                        is_provided = (witness_var in provided_by_args or
                                      witness_var in provided_by_kwargs)
                         is_none = (witness_var in kwargs and kwargs[witness_var] is None)
-                        
+
                         if not is_provided or is_none:
                             missing_witnesses.append(witness_var)
-                
+
                 # Handle missing witnesses based on mode
                 if missing_witnesses:
                     if gs_mode == "VERIFY":
                         # VERIFY mode: inject dummy values for witnesses
                         gs_string, _ = _extract_gs_string_and_witnesses(f)
-                        
+
                         for witness_var in missing_witnesses:
                             dummy_value = _create_dummy_value_for_type(witness_var, gs_string)
                             kwargs[witness_var] = dummy_value
@@ -492,28 +504,82 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
                             raise TypeError(
                                 f"{f.__name__}() missing {num_missing} required positional arguments: {args_str}"
                             )
-            
+
             # Execute function and capture locals
             result, local_vars = _capture_function_locals(f, *args, **kwargs)
-            
+
             # Collect variable values
             collected_values = _collect_variable_values(f, local_vars)
-            
+
             # Get source file info
             source_file = inspect.getfile(f)
             base_name = os.path.splitext(os.path.basename(source_file))[0]
-            
+
             # Process based on mode
             if modular:
                 return _process_modular_mode(f, result, collected_values, source_file, base_name, effective_aliases)
             else:
                 return _process_legacy_mode(f, result, collected_values, source_file, base_name, effective_aliases)
-        
+
+        def gs_add(ctx, *args, aliases: Optional[dict] = None, **kwargs):
+            """
+            Add this function's GS_STRING and values to a GSContext.
+
+            This executes the function to compute values, then registers
+            the GS_STRING and values with the context.
+
+            Args:
+                ctx: GSContext to add to
+                *args, **kwargs: Arguments to pass to the function
+                aliases: Dict mapping GS_STRING names to new names
+                         e.g., {'signature': 'sig_attr1'} renames for this call
+
+            Example:
+                ctx = GSContext(crs)
+                obj.verify.gs_add(ctx, vk, m, sig, aliases={'signature': 'sig1'})
+                obj.verify.gs_add(ctx, vk2, m2, sig2, aliases={'signature': 'sig2'})
+                ast = ctx.finalize()
+            """
+            if gs_string_from_source is None:
+                raise ValueError(f"Function {f.__name__} has no GS_STRING defined")
+
+            # Execute function to compute local values
+            result, local_vars = _capture_function_locals(f, *args, **kwargs)
+
+            # Collect values that appear in the GS_STRING
+            collected_values = _collect_variable_values(f, local_vars)
+
+            # Filter to only values referenced in GS_STRING
+            # Parse GS_STRING to get variable and constant names
+            parser = GSParser()
+            parsed = parser.parse(gs_string_from_source)
+            transformer = ASTTransformer()
+            ast = transformer.transform(parsed)
+
+            gs_names = {v.name for v in ast.vars} | {c.name for c in ast.consts}
+
+            # Build values dict with only GS_STRING names
+            values = {}
+            for name in gs_names:
+                if name in collected_values and collected_values[name] is not None:
+                    values[name] = collected_values[name]
+
+            # Add to context
+            ctx.add(gs_string_from_source, values, aliases)
+
+            return result
+
+        # Attach gs_add as a method on the wrapper
+        wrapper.gs_add = gs_add
+
+        # Store GS_STRING for introspection
+        wrapper._gs_string = gs_string_from_source
+
         # Apply the modified signature to the wrapper
         wrapper.__signature__ = new_sig
-        
+
         return wrapper
-    
+
     # Support both @gsfy and @gsfy(modular=True) syntax
     if func is None:
         # Called as @gsfy(modular=True) or @gsfy()

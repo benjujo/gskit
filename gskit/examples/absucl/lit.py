@@ -25,13 +25,54 @@ class WBB():
 
         return sigma
     
+    @gsfy(witness=['Ftilda'])
+    def verify_absucl(self, Ftilda: G2Element, m: ZpElement, tag: G1Element) -> bool:
+        """
+        Verify a WBB tag in ABSUCL context.
+
+        In ABSUCL, Ftilda = usk * h is the user's secret key in G2 (witness).
+        The tag = 1/(usk + m) * g.
+
+        Verification: e(tag, Ftilda + m*h) = e(g, h)
+        Rearranged:   e(tag, Ftilda) + e(tag, m*h) = e(g, h)
+        As PPE:       e(tag, Ftilda) + e(tag, m_h) + e(-g, h) = 1
+
+        Where m_h = m * h is precomputed.
+        """
+        m_h = m * self.h
+        g_neg = ~self.g
+        gt_zero = self.g.pair(self.h) * ~(self.g.pair(self.h))
+
+        GS_STRING = """
+        variables:
+            Ftilda: G2
+        constants:
+            tag: G1
+            m_h: G2
+            g_neg: G1
+            h: G2
+            gt_zero: GT
+        equations:
+            tag * Ftilda + tag * m_h + g_neg * h = gt_zero
+        """
+
+        # For local variable capture
+        h = self.h
+
+        lhs = tag.pair(Ftilda + m*self.h)
+        rhs = self.g.pair(self.h)
+        return lhs == rhs
+
     @gsfy(witness=['vk'], aliases={'signature': 'tag'})
     def verify(self, vk: G2Element, m: ZpElement, signature: G1Element) -> bool:
         """
-        Verify a WBB signature.
-        
+        Verify a WBB signature (original version).
+
         In ABSUCL protocol, 'signature' is called 'tag'.
         Both witness and aliases are defined together in the decorator.
+
+        Note: This uses complex expressions not supported by grammar.
+        Use verify_absucl for ABSUCL integration.
         """
         GS_STRING = """
         variables:
