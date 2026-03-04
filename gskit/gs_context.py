@@ -16,11 +16,38 @@ Usage:
 
     # Compile
     proof_code = gs_node.compile_proof(ctx.definitions, crs_dict, "elements")
+
+Reserved Constants:
+    The following names are reserved and auto-available from CRS:
+    - g: G1 (generator of G1, same as crs.g1)
+    - h: G2 (generator of G2, same as crs.g2)
+    - zp_zero: ZP (identity element in ZP)
+    - zp_one: ZP (one element in ZP)
+    - zp_minus_one: ZP (minus one element in ZP)
+    - g1_zero: G1 (identity element in G1)
+    - g2_zero: G2 (identity element in G2)
+    - gt_zero: GT (identity element in GT)
+
+    These can be used in equations without declaring them. Attempting to
+    declare these as variables or constants will raise an error.
 """
 from typing import Dict, List, Any, Optional
 from gskit.framework import CRS
 from gskit.parser import GSParser
 from gskit.ast_builder import ASTTransformer
+from gskit.elements import G1Element, G2Element, GTElement, ZpElement
+
+# Reserved constant names and their types
+RESERVED_CONSTANTS = {
+    'g': 'G1',
+    'h': 'G2',
+    'zp_zero': 'ZP',
+    'zp_one': 'ZP',
+    'zp_minus_one': 'ZP',
+    'g1_zero': 'G1',
+    'g2_zero': 'G2',
+    'gt_zero': 'GT',
+}
 
 
 class GSContext:
@@ -32,6 +59,18 @@ class GSContext:
     def __init__(self, crs: CRS):
         self.crs = crs
         self.fragments: List[Dict] = []  # List of {gs_string, values, aliases}
+
+        # Pre-compute reserved constant values from CRS
+        self._reserved_values = {
+            'g': crs.g1,
+            'h': crs.g2,
+            'zp_zero': ZpElement.zero(),
+            'zp_one': ZpElement.init(1),
+            'zp_minus_one': ZpElement.init(-1),
+            'g1_zero': G1Element.zero(),
+            'g2_zero': G2Element.zero(),
+            'gt_zero': GTElement.zero(),
+        }
 
     def add(self, gs_string: str, values: Dict[str, Any], aliases: Optional[Dict[str, str]] = None):
         """
@@ -67,8 +106,31 @@ class GSContext:
             result[new_name] = value
         return result
 
-    def _merge_gs_strings(self) -> str:
-        """Merge all GS_STRING fragments into one."""
+    def _validate_reserved_names(self, name: str, decl_type: str):
+        """
+        Check if a name conflicts with reserved constants.
+
+        Args:
+            name: The variable or constant name
+            decl_type: 'variable' or 'constant' for error messages
+
+        Raises:
+            ValueError: If name is a reserved constant
+        """
+        if name in RESERVED_CONSTANTS:
+            raise ValueError(
+                f"Cannot declare '{name}' as a {decl_type}. "
+                f"'{name}' is a reserved CRS-level constant (type: {RESERVED_CONSTANTS[name]}). "
+                f"Reserved constants are automatically available and cannot be redeclared."
+            )
+
+    def _merge_gs_strings(self) -> tuple:
+        """
+        Merge all GS_STRING fragments into one.
+
+        Returns:
+            tuple: (merged_gs_string, used_reserved_names)
+        """
         if not self.fragments:
             raise ValueError("No GS_STRING fragments to merge")
 
@@ -76,6 +138,7 @@ class GSContext:
         all_vars = {}   # name -> type_str
         all_consts = {} # name -> type_str
         all_eqs = []    # equation strings
+        all_referenced_names = set()  # Track all names used in equations
 
         for fragment in self.fragments:
             gs_string = self._apply_aliases(fragment['gs_string'], fragment['aliases'])
@@ -88,6 +151,9 @@ class GSContext:
 
                 # Collect variables with their types
                 for var in ast.vars:
+                    # Check for reserved name conflicts
+                    self._validate_reserved_names(var.name, 'variable')
+
                     var_type = self._get_type_str(var)
                     if var.name in all_vars:
                         if all_vars[var.name] != var_type:
@@ -100,6 +166,9 @@ class GSContext:
 
                 # Collect constants with their types
                 for const in ast.consts:
+                    # Check for reserved name conflicts
+                    self._validate_reserved_names(const.name, 'constant')
+
                     const_type = self._get_type_str(const)
                     if const.name in all_consts:
                         if all_consts[const.name] != const_type:
@@ -110,17 +179,31 @@ class GSContext:
                     else:
                         all_consts[const.name] = const_type
 
-                # Collect equations
+                # Collect equations and track referenced names
                 for eq in ast.eqs:
                     eq_str = self._equation_to_string(eq)
                     all_eqs.append(eq_str)
+                    # Extract names from equation
+                    all_referenced_names.update(self._extract_names_from_equation(eq))
 
             except Exception as e:
                 raise RuntimeError(f"Error parsing GS_STRING: {e}\n{gs_string}")
 
-        # Build merged GS_STRING
+        # Find which reserved constants are used in equations but not declared
+        used_reserved = set()
+        for name in all_referenced_names:
+            if name in RESERVED_CONSTANTS:
+                if name not in all_consts:
+                    used_reserved.add(name)
+
+        # Build merged GS_STRING with reserved constants included
         var_lines = [f"    {name}: {typ}" for name, typ in all_vars.items()]
+
+        # Add reserved constants that are used
         const_lines = [f"    {name}: {typ}" for name, typ in all_consts.items()]
+        for reserved_name in sorted(used_reserved):
+            const_lines.append(f"    {reserved_name}: {RESERVED_CONSTANTS[reserved_name]}")
+
         eq_lines = [f"    {eq}" for eq in all_eqs]
 
         merged = "variables:\n"
@@ -131,7 +214,18 @@ class GSContext:
         merged += "\n".join(eq_lines) if eq_lines else "    # none"
         merged += "\n"
 
-        return merged
+        return merged, used_reserved
+
+    def _extract_names_from_equation(self, eq) -> set:
+        """Extract all variable/constant names referenced in an equation."""
+        names = set()
+        for mul in eq.eq_muls:
+            names.add(mul.left)
+            names.add(mul.right)
+            if mul.gamma:
+                names.add(mul.gamma)
+        names.add(eq.target)
+        return names
 
     def _get_type_str(self, node) -> str:
         """Get type string from a node."""
@@ -156,14 +250,24 @@ class GSContext:
                 parts.append(f"{mul.left} * {mul.right}")
         return " + ".join(parts) + f" = {eq.target}"
 
-    def _collect_values(self) -> Dict[str, Any]:
-        """Collect all values, applying aliases and checking for conflicts."""
+    def _collect_values(self, used_reserved: set = None) -> Dict[str, Any]:
+        """
+        Collect all values, applying aliases and checking for conflicts.
+
+        Args:
+            used_reserved: Set of reserved constant names that are used.
+                          If provided, their values will be added from CRS.
+        """
         all_values = {}
 
         for fragment in self.fragments:
             values = self._apply_aliases_to_values(fragment['values'], fragment['aliases'])
 
             for name, value in values.items():
+                # Skip reserved names - they come from CRS, not user values
+                if name in RESERVED_CONSTANTS:
+                    continue
+
                 if name in all_values:
                     # Check if same value (by comparison)
                     if not self._values_equal(all_values[name], value):
@@ -172,6 +276,11 @@ class GSContext:
                         )
                 else:
                     all_values[name] = value
+
+        # Add reserved constant values that are used
+        if used_reserved:
+            for name in used_reserved:
+                all_values[name] = self._reserved_values[name]
 
         return all_values
 
@@ -186,7 +295,9 @@ class GSContext:
     @property
     def definitions(self) -> Dict[str, str]:
         """Get definitions dict (name -> JSON serialized value) for compilation."""
-        values = self._collect_values()
+        # Get merged string to find used reserved constants
+        _, used_reserved = self._merge_gs_strings()
+        values = self._collect_values(used_reserved)
         return {name: val.__json__() for name, val in values.items()}
 
     def finalize(self):
@@ -196,11 +307,11 @@ class GSContext:
         Returns:
             GSNode ready for compile_proof() or compile_verify()
         """
-        # Validate values first
-        self._collect_values()
+        # Merge and parse (also validates reserved names)
+        merged_string, used_reserved = self._merge_gs_strings()
 
-        # Merge and parse
-        merged_string = self._merge_gs_strings()
+        # Validate values (also adds reserved values)
+        self._collect_values(used_reserved)
 
         parser = GSParser()
         parsed = parser.parse(merged_string)
@@ -214,4 +325,5 @@ class GSContext:
 
     def get_merged_string(self) -> str:
         """Get the merged GS_STRING (for debugging)."""
-        return self._merge_gs_strings()
+        merged, _ = self._merge_gs_strings()
+        return merged

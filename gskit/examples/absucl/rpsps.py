@@ -101,8 +101,8 @@ class RPSPS():
         z_minus_one = ZpElement.init(-1)
         Z_neg = ~Z  # -Z for the PPE equation
         attr_Y = attr * Y  # Precompute attr * Y as G2 constant
-        g1_zero = G1Element.zero()
-        gt_zero = self.g.pair(self.h) * ~(self.g.pair(self.h))  # Identity in GT
+
+        # Note: g1_zero, gt_zero are reserved CRS constants (auto-available)
 
         GS_STRING = """
         variables:
@@ -117,8 +117,6 @@ class RPSPS():
             X: G2
             attr_Y: G2
             Z_neg: G2
-            g1_zero: G1
-            gt_zero: GT
         equations:
             z * S + z_minus_one * S_tilde = g1_zero
             z * R + z_minus_one * R_tilde = g1_zero

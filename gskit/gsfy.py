@@ -87,6 +87,9 @@ def _extract_gs_string_and_witnesses(func: Callable) -> Tuple[Optional[str], Set
     """
     try:
         source = inspect.getsource(func)
+        # Dedent the source to handle methods inside classes
+        import textwrap
+        source = textwrap.dedent(source)
         tree = ast.parse(source)
         
         gs_string = None
@@ -446,15 +449,19 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
             witness_vars = auto_witness_vars
 
         # Create a modified signature where witness parameters are optional (have defaults)
-        new_params = []
+        # Non-default params must come before default params, so we reorder
+        non_witness_params = []
+        witness_params = []
         for param_name, param in sig.parameters.items():
             if param_name in witness_vars:
                 # Make witness parameters optional with None default
                 new_param = param.replace(default=None)
-                new_params.append(new_param)
+                witness_params.append(new_param)
             else:
-                new_params.append(param)
+                non_witness_params.append(param)
 
+        # Combine: non-witness first, then witness (which have defaults)
+        new_params = non_witness_params + witness_params
         new_sig = sig.replace(parameters=new_params)
 
         @wraps(f)
@@ -528,16 +535,23 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
             This executes the function to compute values, then registers
             the GS_STRING and values with the context.
 
+            For methods on a class, pass the instance as the first arg after ctx:
+                obj.method.gs_add(ctx, obj, arg1, arg2, aliases={...})
+
+            For regular functions:
+                func.gs_add(ctx, arg1, arg2, aliases={...})
+
             Args:
                 ctx: GSContext to add to
-                *args, **kwargs: Arguments to pass to the function
+                *args: For methods, (instance, arg1, arg2, ...). For functions, (arg1, arg2, ...)
                 aliases: Dict mapping GS_STRING names to new names
-                         e.g., {'signature': 'sig_attr1'} renames for this call
 
             Example:
                 ctx = GSContext(crs)
-                obj.verify.gs_add(ctx, vk, m, sig, aliases={'signature': 'sig1'})
-                obj.verify.gs_add(ctx, vk2, m2, sig2, aliases={'signature': 'sig2'})
+                # For methods - pass self explicitly
+                lit.verify.gs_add(ctx, lit, vk, m, sig, aliases={'signature': 'sig1'})
+                # For functions
+                verify.gs_add(ctx, vk, m, sig, aliases={'signature': 'sig1'})
                 ast = ctx.finalize()
             """
             if gs_string_from_source is None:
@@ -554,9 +568,9 @@ def gsfy(func: Optional[Callable] = None, *, modular: bool = False, witness: Opt
             parser = GSParser()
             parsed = parser.parse(gs_string_from_source)
             transformer = ASTTransformer()
-            ast = transformer.transform(parsed)
+            gs_ast = transformer.transform(parsed)
 
-            gs_names = {v.name for v in ast.vars} | {c.name for c in ast.consts}
+            gs_names = {v.name for v in gs_ast.vars} | {c.name for c in gs_ast.consts}
 
             # Build values dict with only GS_STRING names
             values = {}

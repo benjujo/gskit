@@ -120,29 +120,28 @@ class ABSUCL():
         ctx.add(msp_gs_string, msp_values)
 
         # === Add LIT (tag) verification to context ===
-        self.lit.verify_absucl.gs_add(ctx, Ftilda, recip_zp, tag,
+        # Note: For methods, pass the instance (self.lit) as first arg after ctx
+        self.lit.verify_absucl.gs_add(ctx, self.lit, Ftilda, recip_zp, tag,
                                        aliases={'Ftilda': 'Ftilda'})  # Ftilda is shared
 
         # === Add consistency equation (F, Ftilda from same usk) ===
+        # Proves: e(F, h) = e(g, Ftilda), i.e., both from same usk
+        # Rearranged: e(F, h) + e(-g, Ftilda) = 1
+        # Note: h, g, gt_zero are reserved CRS constants (auto-available)
         g_neg = ~self.g
-        gt_zero = self.g.pair(self.h) * ~(self.g.pair(self.h))
         consistency_gs = """
         variables:
             F: G1
             Ftilda: G2
         constants:
-            h: G2
             g_neg: G1
-            gt_zero: GT
         equations:
             F * h + g_neg * Ftilda = gt_zero
         """
         ctx.add(consistency_gs, {
             'F': F,
             'Ftilda': Ftilda,
-            'h': self.h,
             'g_neg': g_neg,
-            'gt_zero': gt_zero
         })
 
         # === Add RPSPS verification for each attribute ===
@@ -154,8 +153,9 @@ class ABSUCL():
             z = z_values[attr_name]
             attr_zp = ZpElement.from_str(attr_name)
 
+            # Note: For methods, pass the instance (self.psps) as first arg after ctx
             self.psps.z_is_zero_or_verify_absucl.gs_add(
-                ctx,
+                ctx, self.psps,
                 vk=self.vk_attrs[attr_name],
                 Ftilda=Ftilda,
                 R=R,
@@ -172,8 +172,7 @@ class ABSUCL():
                     'X': f'X_{attr_name}',
                     'attr_Y': f'attr_Y_{attr_name}',
                     'Z_neg': f'Z_neg_{attr_name}',
-                    'g1_zero': f'g1_zero_{attr_name}',
-                    'gt_zero': f'gt_zero_{attr_name}',
+                    # Note: g1_zero, gt_zero are reserved - no alias needed
                     'Ftilda': 'Ftilda',  # Shared across all
                 }
             )
@@ -185,8 +184,9 @@ class ABSUCL():
         sigma_psdo = randomized_sk_ida["PSDO"][0]
         z_psdo = z_values["PSDO"]
 
+        # Note: For methods, pass the instance (self.ds) as first arg after ctx
         self.ds.z_is_zero_or_verify_absucl.gs_add(
-            ctx,
+            ctx, self.ds,
             vk_combined=vk_psdo_combined,
             sigma=sigma_psdo,
             z=z_psdo,
@@ -195,12 +195,10 @@ class ABSUCL():
                 'sigma': 'sigma_PSDO',
                 'sigma_tilde': 'sigma_tilde_PSDO',
                 'g_tilde': 'g_tilde_PSDO',
-                'g': 'g_PSDO',
+                # Note: g, g1_zero, gt_zero are reserved - no alias needed
                 'z_minus_one': 'z_minus_one_PSDO',
                 'vk_combined': 'vk_psdo_combined',
                 'h_neg': 'h_neg_PSDO',
-                'g1_zero': 'g1_zero_PSDO',
-                'gt_zero': 'gt_zero_PSDO',
             }
         )
 

@@ -62,8 +62,8 @@ class FBB():
         # Constants for equations
         z_minus_one = ZpElement.init(-1)
         h_neg = ~self.h  # -h for the equation
-        g1_zero = G1Element.zero()
-        gt_zero = self.g.pair(self.h) * ~(self.g.pair(self.h))  # Identity in GT
+
+        # Note: g, g1_zero, gt_zero are reserved CRS constants (auto-available)
 
         GS_STRING = """
         variables:
@@ -72,20 +72,14 @@ class FBB():
             sigma_tilde: G1
             g_tilde: G1
         constants:
-            g: G1
             z_minus_one: ZP
             vk_combined: G2
             h_neg: G2
-            g1_zero: G1
-            gt_zero: GT
         equations:
             z * sigma + z_minus_one * sigma_tilde = g1_zero
             z * g + z_minus_one * g_tilde = g1_zero
             sigma_tilde * vk_combined + g_tilde * h_neg = gt_zero
         """
-
-        # For local variable capture
-        g = self.g
 
         # Standard verification (for return value)
         lhs = sigma_tilde.pair(vk_combined)

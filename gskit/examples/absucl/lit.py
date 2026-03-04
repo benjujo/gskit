@@ -41,7 +41,8 @@ class WBB():
         """
         m_h = m * self.h
         g_neg = ~self.g
-        gt_zero = self.g.pair(self.h) * ~(self.g.pair(self.h))
+
+        # Note: h, gt_zero are reserved CRS constants (auto-available)
 
         GS_STRING = """
         variables:
@@ -50,14 +51,9 @@ class WBB():
             tag: G1
             m_h: G2
             g_neg: G1
-            h: G2
-            gt_zero: GT
         equations:
             tag * Ftilda + tag * m_h + g_neg * h = gt_zero
         """
-
-        # For local variable capture
-        h = self.h
 
         lhs = tag.pair(Ftilda + m*self.h)
         rhs = self.g.pair(self.h)
